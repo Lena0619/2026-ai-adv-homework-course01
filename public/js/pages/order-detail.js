@@ -11,6 +11,7 @@ createApp({
     const order = ref(null);
     const loading = ref(true);
     const paying = ref(false);
+    const querying = ref(false);
 
     const statusMap = {
       pending: { label: '待付款', cls: 'bg-apricot/20 text-apricot' },
@@ -24,25 +25,52 @@ createApp({
       cancel: { text: '付款已取消。', cls: 'bg-apricot/10 text-apricot border border-apricot/20' },
     };
 
-    async function simulatePay(action) {
+    async function handleEcpayCheckout() {
       if (!order.value || paying.value) return;
       paying.value = true;
       try {
-        const res = await apiFetch('/api/orders/' + order.value.id + '/pay', {
-          method: 'PATCH',
-          body: JSON.stringify({ action })
+        const res = await apiFetch('/api/ecpay/checkout/' + order.value.id, { method: 'POST' });
+        const { action, params } = res.data;
+
+        // 動態建立 form 並 POST 至綠界（瀏覽器會跳轉離開此頁）
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = action;
+        Object.entries(params).forEach(([key, value]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value;
+          form.appendChild(input);
         });
-        order.value = res.data;
-        paymentResult.value = action === 'success' ? 'success' : 'failed';
+        document.body.appendChild(form);
+        form.submit();
+        // 頁面即將跳轉，不需 reset paying
       } catch (e) {
-        Notification.show('付款處理失敗', 'error');
-      } finally {
+        Notification.show('產生付款連結失敗', 'error');
         paying.value = false;
       }
     }
 
-    function handlePaySuccess() { simulatePay('success'); }
-    function handlePayFail() { simulatePay('fail'); }
+    async function handleQueryPayment() {
+      if (!order.value || querying.value) return;
+      querying.value = true;
+      try {
+        const res = await apiFetch('/api/orders/' + order.value.id + '/ecpay/query', { method: 'POST' });
+        order.value = res.data;
+        if (res.data.status === 'paid') {
+          paymentResult.value = 'success';
+        } else if (res.data.status === 'failed') {
+          paymentResult.value = 'failed';
+        } else {
+          Notification.show('付款尚未完成，請稍後再查詢', 'info');
+        }
+      } catch (e) {
+        Notification.show('查詢付款狀態失敗', 'error');
+      } finally {
+        querying.value = false;
+      }
+    }
 
     onMounted(async function () {
       try {
@@ -55,6 +83,10 @@ createApp({
       }
     });
 
-    return { order, loading, paying, paymentResult, statusMap, paymentMessages, handlePaySuccess, handlePayFail };
+    return {
+      order, loading, paying, querying, paymentResult,
+      statusMap, paymentMessages,
+      handleEcpayCheckout, handleQueryPayment,
+    };
   }
 }).mount('#app');

@@ -52,7 +52,7 @@ function initializeDatabase() {
       recipient_address TEXT NOT NULL,
       total_amount INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'failed')),
-
+      merchant_trade_no TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
@@ -67,6 +67,12 @@ function initializeDatabase() {
       FOREIGN KEY (order_id) REFERENCES orders(id)
     );
   `);
+
+  // Migration: add merchant_trade_no if not exists
+  const cols = db.pragma('table_info(orders)').map(c => c.name);
+  if (!cols.includes('merchant_trade_no')) {
+    db.exec('ALTER TABLE orders ADD COLUMN merchant_trade_no TEXT');
+  }
 
   // Seed data
   seedAdminUser();

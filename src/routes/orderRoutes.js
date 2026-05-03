@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../database');
 const authMiddleware = require('../middleware/authMiddleware');
+const { queryTradeInfo } = require('../services/ecpay');
 
 const router = express.Router();
 
@@ -413,6 +414,43 @@ router.patch('/:id/pay', (req, res) => {
     error: null,
     message: action === 'success' ? '付款成功' : '付款失敗'
   });
+});
+
+// POST /api/orders/:id/ecpay/query — 主動呼叫綠界 QueryTradeInfo 確認付款狀態
+router.post('/:id/ecpay/query', async (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user.userId);
+
+  if (!order) {
+    return res.status(404).json({ data: null, error: 'NOT_FOUND', message: '訂單不存在' });
+  }
+  if (!order.merchant_trade_no) {
+    return res.status(400).json({ data: null, error: 'NOT_SUBMITTED', message: '此訂單尚未送出付款' });
+  }
+  if (order.status !== 'pending') {
+    const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+    return res.json({ data: { ...order, items }, error: null, message: '訂單狀態已確認' });
+  }
+
+  try {
+    const result = await queryTradeInfo(order.merchant_trade_no);
+    // TradeStatus: '1'=付款成功, '0'=尚未付款, 其他=失敗
+    let newStatus = order.status;
+    if (result.TradeStatus === '1') newStatus = 'paid';
+    else if (result.TradeStatus !== '0') newStatus = 'failed';
+
+    if (newStatus !== order.status) {
+      db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(newStatus, order.id);
+    }
+
+    const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+    const msg = newStatus === 'paid' ? '付款已確認' : newStatus === 'failed' ? '付款失敗' : '付款尚未完成';
+    res.json({ data: { ...updated, items }, error: null, message: msg });
+  } catch (err) {
+    console.error('[ECPay query] error:', err.message);
+    res.status(502).json({ data: null, error: 'ECPAY_ERROR', message: '查詢付款狀態失敗，請稍後再試' });
+  }
 });
 
 module.exports = router;

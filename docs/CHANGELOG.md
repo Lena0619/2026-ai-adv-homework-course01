@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### 新增
+
+- **綠界 ECPay 金流整合**：串接 AIO 信用卡付款（測試環境），訂單詳情頁新增「前往綠界付款」按鈕
+  - `src/services/ecpay.js`：CheckMacValue（SHA256）計算、QueryTradeInfo 主動查詢、付款參數組建
+  - `src/routes/ecpayRoutes.js`：`POST /api/ecpay/checkout/:orderId`、`POST /api/ecpay/notify`、`POST /api/ecpay/result`
+  - `POST /api/orders/:id/ecpay/query`：主動查詢綠界付款狀態並更新訂單
+- **orders 表新增 `merchant_trade_no` 欄位**：追蹤對應的綠界交易編號（由 order_no 移除 dash 推導）
+- **訂單詳情頁更新**：新增「前往綠界付款」與「確認付款狀態」按鈕，移除模擬付款按鈕
+
+### 技術備注
+
+- 本地開發（port 3001）無法接收 ECPay S2S ReturnURL callback，付款確認改以 `QueryTradeInfo` 主動查詢為主
+- 不新增 npm 套件，使用 Node.js 內建 `node:crypto`、`URLSearchParams`、`fetch`
+- SQLite 不支援 `ALTER TABLE ADD COLUMN ... UNIQUE`，`merchant_trade_no` 唯一性由應用層（order_no 唯一）保證
+
+---
+
 ## [1.0.0] — 2026-05-03
 
 ### 新增

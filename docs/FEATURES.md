@@ -8,6 +8,7 @@
 | 商品瀏覽 | ✅ 完成 | 公開商品列表（分頁）、商品詳情 |
 | 購物車 | ✅ 完成 | 雙模式（訪客/登入）、CRUD |
 | 訂單管理 | ✅ 完成 | 建立訂單、查詢、模擬付款 |
+| 綠界 ECPay 金流 | ✅ 完成 | AIO 信用卡付款、QueryTradeInfo 主動查詢 |
 | 管理後台 - 商品 | ✅ 完成 | CRUD、刪除保護 |
 | 管理後台 - 訂單 | ✅ 完成 | 列表（status 篩選）、詳情 |
 | EJS 前端頁面 | ✅ 完成 | 前台9頁 + 後台2頁 |
@@ -175,6 +176,7 @@
 | GET | `/api/orders` | JWT | — | 200 `{orders[]}` |
 | GET | `/api/orders/:id` | JWT | — | 200 `{...order, items[]}` |
 | PATCH | `/api/orders/:id/pay` | JWT | `{action: "success"\|"fail"}` | 200 `{...order, items[]}` |
+| POST | `/api/orders/:id/ecpay/query` | JWT | — | 200 `{...order, items[]}` |
 
 ### 錯誤碼
 
@@ -184,8 +186,84 @@
 | 400 | `CART_EMPTY` | 購物車為空無法建立訂單 |
 | 400 | `STOCK_INSUFFICIENT` | 商品庫存不足 |
 | 400 | `INVALID_STATUS` | 訂單狀態非 pending，無法付款 |
+| 400 | `NOT_SUBMITTED` | 尚未送出付款（merchant_trade_no 為空）|
 | 401 | `UNAUTHORIZED` | 未登入或 token 無效 |
 | 404 | `NOT_FOUND` | 訂單不存在或不屬於當前用戶 |
+| 502 | `ECPAY_ERROR` | 呼叫綠界 QueryTradeInfo 失敗 |
+
+---
+
+## 4.1 綠界 ECPay 金流
+
+### 行為描述
+
+使用者在訂單詳情頁對 `status = 'pending'` 的訂單進行真實信用卡付款。
+
+**取得付款參數**（`POST /api/ecpay/checkout/:orderId`）：
+- 需 JWT，訂單必須屬於當前用戶
+- 若 `merchant_trade_no` 尚未生成，由 `order_no` 移除 dash 推導（`ORD-20260503-ABC12` → `ORD20260503ABC12`），並儲存至 DB
+- 回傳 `{action: "https://payment-stage.ecpay.com.tw/...", params: {...}}` — 前端動態建立 `<form>` POST 至綠界，瀏覽器跳轉離開
+
+**綠界付款結果導回**（`POST /api/ecpay/result`）：
+- 綠界付款完成後將瀏覽器 redirect 至此端點（`OrderResultURL`），無需認證
+- 根據 `RtnCode` 導向 `/orders/:id?payment=success` 或 `/orders/:id?payment=failed`
+- 注意：ECPay 僅允許 `OrderResultURL` 為 port 80/443，本地 port 3001 下此 redirect 可能不會到達
+
+**綠界 S2S Callback**（`POST /api/ecpay/notify`）：
+- 綠界付款完成後 server-to-server 呼叫此端點（`ReturnURL`），無需認證
+- 驗證 `CheckMacValue` 後依 `RtnCode` 更新訂單狀態
+- 本地開發（port 3001）無法接收此 callback，實作供正式環境部署使用
+
+**主動查詢付款狀態**（`POST /api/orders/:id/ecpay/query`）：
+- 需 JWT，本地開發的主要確認機制（替代 S2S callback）
+- 訂單必須已有 `merchant_trade_no`（即已送出至綠界）
+- 呼叫 ECPay `QueryTradeInfo` API：`TradeStatus='1'` → 更新為 `'paid'`；其他非 `'0'` → `'failed'`
+- 狀態已確認（非 pending）的訂單直接回傳現有狀態，不重複查詢
+
+### 付款流程
+
+```
+訂單詳情頁（status=pending）
+  │
+  ├─ 點「前往綠界付款」
+  │   └─ POST /api/ecpay/checkout/:id → 取得 {action, params}
+  │       └─ 前端動態 form.submit() → 瀏覽器跳轉至綠界付款頁
+  │           └─ 使用者完成付款
+  │               └─ 綠界 redirect 回 /api/ecpay/result（若 port 允許）
+  │                   └─ redirect 至 /orders/:id?payment=success
+  │
+  └─ 回到訂單頁後，點「確認付款狀態」
+      └─ POST /api/orders/:id/ecpay/query → 呼叫 ECPay QueryTradeInfo
+          └─ 更新訂單狀態至 paid / failed / pending
+```
+
+### 端點表
+
+| 方法 | 路徑 | 認證 | 說明 |
+|------|------|------|------|
+| POST | `/api/ecpay/checkout/:orderId` | JWT | 產生 ECPay AIO 付款參數 |
+| POST | `/api/ecpay/notify` | 無（驗 CMV） | 綠界 S2S 付款通知 callback |
+| POST | `/api/ecpay/result` | 無 | 綠界付款完成後瀏覽器導回 |
+| POST | `/api/orders/:id/ecpay/query` | JWT | 主動查詢並更新付款狀態 |
+
+### 環境變數
+
+| 變數 | 說明 | 測試值 |
+|------|------|------|
+| `ECPAY_MERCHANT_ID` | 綠界商店代號 | `3002607` |
+| `ECPAY_HASH_KEY` | 用於 CheckMacValue 計算 | `pwFHCqoQZGmho4w6` |
+| `ECPAY_HASH_IV` | 用於 CheckMacValue 計算 | `EkRm7iFT261dpevs` |
+| `ECPAY_ENV` | `stage`（測試）或 `production` | `stage` |
+| `BASE_URL` | 伺服器公開 URL（用於 ReturnURL/OrderResultURL） | `http://localhost:3001` |
+
+### 錯誤碼
+
+| 狀態碼 | error | 情境 |
+|--------|-------|------|
+| 400 | `INVALID_STATUS` | 訂單非 pending 狀態，無法送出付款 |
+| 400 | `NOT_SUBMITTED` | 尚未送出付款（無 merchant_trade_no） |
+| 404 | `NOT_FOUND` | 訂單不存在或不屬於當前用戶 |
+| 502 | `ECPAY_ERROR` | 呼叫 ECPay QueryTradeInfo API 失敗 |
 
 ---
 

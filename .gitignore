@@ -36,5 +36,5 @@ coverage/
 *.tmp
 *.swp
 
-.claude/*.local.json
+
 public/css/output.css
